@@ -7,8 +7,8 @@ struct WorkspacesApp: App {
             Button("Save Workspace") {
                 WorkspaceManager.saveWorkspace(name: "MyWorkspace")
             }
-            Button("Load Workspace") {
-                WorkspaceManager.loadWorkspace(name: "MyWorkspace")
+            Button("Debug List Window Frames") {
+                WorkspaceManager.debugListWindowFrames()
             }
             Divider()
             Button("List Running Apps") {
