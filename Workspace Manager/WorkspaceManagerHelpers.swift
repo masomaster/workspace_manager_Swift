@@ -97,6 +97,12 @@ struct WorkspaceManager {
                 guard let name = app.localizedName,
                       let bundleID = app.bundleIdentifier else { return nil }
 
+                // 🚫 Skip Finder entirely
+                if bundleID == "com.apple.finder" {
+                    print("[saveWorkspace] Skipping Finder")
+                    return nil
+                }
+                
                 print("[saveWorkspace] Processing app: \(name) (\(bundleID))")
 
                 var windowData: [[String: Any]] = []
@@ -194,6 +200,8 @@ struct WorkspaceManager {
                         extras["wordDocs"] = docs
                     }
                 }
+                
+                
 
                 // Combine standard + extras
                 var appEntry: [String: Any] = [
@@ -247,6 +255,13 @@ struct WorkspaceManager {
                         print("[restoreWorkspace] Resolved app URL: \(url.path)")
                         print("[restoreWorkspace] Launching app: \(appName)")
                         openApp(at: url)
+                        
+                        // If app has no saved windows, don’t try to manipulate AX windows
+                        let hasWindows = (app["windows"] as? [[String: Any]])?.isEmpty == false
+                        if !hasWindows {
+                            print("[restoreWorkspace] \(appName) has no saved windows; launching only.")
+                            continue
+                        }
 
                         // Wait a bit for the app to launch if needed
                         usleep(400_000)
