@@ -20,16 +20,8 @@ struct WorkspacesApp: App {
                 menuModel.refresh() // update list after saving
             }
 
-            Button("Debug List Window Frames") {
-                WorkspaceManager.debugListWindowFrames()
-            }
-
             Divider()
-            Button("List Running Apps") {
-                print(WorkspaceManager.listRunningApps())
-            }
 
-            // Restore menu section
             Menu("Restore Workspace") {
                 if menuModel.savedWorkspaces.isEmpty {
                     Text("No saved workspaces")
@@ -46,6 +38,7 @@ struct WorkspacesApp: App {
             }
 
             Divider()
+            
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
