@@ -43,7 +43,7 @@ struct WorkspaceManager {
 
     static let saveDir: URL = {
         let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Workspaces")
+            .appendingPathComponent("Library/Application Support/Workspace Manager/Workspaces")
         _ = try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
@@ -201,8 +201,6 @@ struct WorkspaceManager {
                     }
                 }
                 
-                
-
                 // Combine standard + extras
                 var appEntry: [String: Any] = [
                     "name": name,
@@ -792,10 +790,68 @@ struct WorkspaceManager {
         return nil
     }
     
-    static func listSavedWorkspaces() {
+    static func listSavedWorkspaces() -> [String] {
         let files = (try? FileManager.default.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)) ?? []
-        for file in files where file.pathExtension == "json" {
-            print("Saved: \(file.lastPathComponent)")
+        let names = files
+            .filter { $0.pathExtension == "json" }
+            .map { $0.deletingPathExtension().lastPathComponent }
+        return names
+    }
+
+    /// Shows an alert dialog asking the user for a workspace name, then saves the workspace with that name.
+    static func promptAndSaveWorkspace(onComplete: (() -> Void)? = nil) {
+        let alert = NSAlert()
+        alert.messageText = "Save Workspace"
+        alert.informativeText = "Enter a name for your workspace:"
+        alert.alertStyle = .informational
+
+        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        alert.accessoryView = inputField
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = inputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                saveWorkspace(name: name)
+            }
+        }
+
+        // Run the completion *after* the user’s choice is handled
+        onComplete?()
+    }
+
+    /// Shows an alert dialog with a dropdown of saved workspaces, and restores the selected one.
+    static func chooseWorkspaceToRestore() {
+        DispatchQueue.main.async {
+            let names = listSavedWorkspaces()
+            guard !names.isEmpty else {
+                let alert = NSAlert()
+                alert.messageText = "No Saved Workspaces"
+                alert.informativeText = "There are no saved workspaces to restore."
+                alert.alertStyle = .warning
+                alert.runModal()
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "Restore Workspace"
+            alert.informativeText = "Choose a workspace to restore:"
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Restore")
+            alert.addButton(withTitle: "Cancel")
+
+            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+            popup.addItems(withTitles: names)
+            alert.accessoryView = popup
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                let selected = popup.selectedItem?.title ?? ""
+                if !selected.isEmpty {
+                    restoreWorkspace(name: selected)
+                }
+            }
         }
     }
     
