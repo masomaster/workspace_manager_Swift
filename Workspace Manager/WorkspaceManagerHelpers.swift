@@ -301,73 +301,97 @@ struct WorkspaceManager {
         }
 
         static func restoreSafariTabs(_ tabsList: [[String]]) {
-            // Enhanced: ensure Safari has at least one window before adding tabs, and delay after launch if needed
-            let safariRunning = NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == "com.apple.Safari" })
-            if !safariRunning {
-                // Launch Safari if not running
-                if let safariURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") {
-                    WorkspaceManager.openApp(at: safariURL)
-                    // Wait briefly for Safari to launch and create its first window
-                    usleep(400_000) // 0.4s
-                }
-            }
-            // Filter out empty tab sets and empty URLs
-            let nonEmptyTabSets = tabsList.map { $0.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+            let nonEmptyTabSets = tabsList
+                .map { $0.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
                 .filter { !$0.isEmpty }
             guard !nonEmptyTabSets.isEmpty else {
                 print("No Safari tabs to restore.")
                 return
             }
 
-            // AppleScript to create windows/tabs and assign correct URLs
+            // 1. Get all currently open Safari tab URLs across all windows
+            let getOpenTabsScript = """
+            tell application "Safari"
+                set allTabURLs to {}
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        set u to URL of t
+                        if u is not missing value and u is not "" then
+                            copy u to end of allTabURLs
+                        end if
+                    end repeat
+                end repeat
+                return allTabURLs
+            end tell
+            """
+            var openURLs: Set<String> = []
+            if let apple = NSAppleScript(source: getOpenTabsScript) {
+                var err: NSDictionary?
+                let output = apple.executeAndReturnError(&err)
+                if let err = err {
+                    print("Error getting open Safari tab URLs: \(err)")
+                } else if let listDesc = output.coerce(toDescriptorType: typeAEList) {
+                    for i in 1...listDesc.numberOfItems {
+                        if let url = listDesc.atIndex(i)?.stringValue {
+                            let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty {
+                                openURLs.insert(trimmed)
+                            }
+                        }
+                    }
+                }
+            }
+
             var scriptLines: [String] = []
             scriptLines.append("tell application \"Safari\"")
             scriptLines.append("activate")
-            // If no windows, create one
-            scriptLines.append("if (count of windows) = 0 then make new document")
 
-            var winIdx = 1
-            for (tabSetIdx, tabSet) in nonEmptyTabSets.enumerated() {
-                if tabSetIdx == 0 {
-                    // Use existing window 1 for first set
-                    scriptLines.append("set w to window 1")
-                } else {
-                    // Create new window for each subsequent set
-                    scriptLines.append("set w to (make new document)")
+            for tabSet in nonEmptyTabSets {
+                // Check which URLs in tabSet are already open
+                let missingURLs = tabSet.filter { !openURLs.contains($0) }
+                if missingURLs.isEmpty {
+                    print("Skipping Safari window/tab set: all URLs already open: \(tabSet)")
+                    continue
                 }
-                for (tabIdx, urlString) in tabSet.enumerated() {
-                    let escapedURL = urlString.replacingOccurrences(of: "\"", with: "\\\"")
-                    if tabIdx == 0 {
-                        // Set URL of first tab in window
+                print("Restoring Safari window with \(missingURLs.count) missing tabs (out of \(tabSet.count)): \(missingURLs)")
+                let firstURL = missingURLs[0].replacingOccurrences(of: "\"", with: "\\\"")
+                // Create a new window with the first missing URL
+                scriptLines.append("set newWin to make new document with properties {URL:\"\(firstURL)\"}")
+                scriptLines.append("delay 1") // give Safari time to create the window
+
+                if missingURLs.count > 1 {
+                    for url in missingURLs.dropFirst() {
+                        let esc = url.replacingOccurrences(of: "\"", with: "\\\"")
                         scriptLines.append("""
-                            try
-                                set URL of front tab of w to "\(escapedURL)"
-                            on error errMsg
-                                log "Failed to restore Safari tab: \(escapedURL): " & errMsg
-                            end try
-                        """)
-                    } else {
-                        // Add new tab and set its URL
-                        scriptLines.append("""
-                            try
-                                tell w
-                                    set t to make new tab at end
-                                    set URL of t to "\(escapedURL)"
-                                end tell
-                            on error errMsg
-                                log "Failed to restore Safari tab: \(escapedURL): " & errMsg
-                            end try
+                            tell front window
+                                set t to make new tab at end of tabs
+                                set URL of t to "\(esc)"
+                            end tell
+                            delay 0.5
                         """)
                     }
                 }
-                winIdx += 1
+                // Add these URLs to openURLs to avoid duplicating them in subsequent sets
+                for url in missingURLs {
+                    openURLs.insert(url)
+                }
             }
+
             scriptLines.append("end tell")
+
             let script = scriptLines.joined(separator: "\n")
+            if scriptLines.count <= 2 {
+                print("No new Safari windows/tabs to restore (all URLs already open).")
+                return
+            }
             if let apple = NSAppleScript(source: script) {
                 var err: NSDictionary?
                 _ = apple.executeAndReturnError(&err)
-                if let err = err { print("Safari restore error: \(err)") }
+                if let err = err {
+                    print("Safari restore error: \(err)")
+                } else {
+                    print("Safari tabs restored successfully.")
+                }
             }
         }
 
@@ -379,8 +403,8 @@ struct WorkspaceManager {
                 if it is running then
                     set docList to {}
                     set docCount to count of documents
-                    if docCount = 0 then return ""
-                    
+                    if docCount = 0 then return {}
+
                     repeat with i from 1 to docCount
                         set doc to document i
                         if saved of doc is true then
@@ -393,10 +417,7 @@ struct WorkspaceManager {
                             end if
                         end if
                     end repeat
-                    set AppleScript's text item delimiters to "|||"
-                    set docResult to docList as string
-                    set AppleScript's text item delimiters to ""
-                    return docResult
+                    return docList
                 end if
             end tell
             """
@@ -409,9 +430,12 @@ struct WorkspaceManager {
                 }
                 var paths: [String] = []
                 if let listDesc = output.coerce(toDescriptorType: typeAEList) {
-                    for i in 1...listDesc.numberOfItems {
-                        if let p = listDesc.atIndex(i)?.stringValue {
-                            paths.append(p)
+                    let count = listDesc.numberOfItems
+                    if count > 0 {
+                        for i in 1...listDesc.numberOfItems {
+                            if let p = listDesc.atIndex(i)?.stringValue {
+                                paths.append(p)
+                            }
                         }
                     }
                 }
