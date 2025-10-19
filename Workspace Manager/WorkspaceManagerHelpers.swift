@@ -169,119 +169,179 @@ struct WorkspaceManager {
         }
     }
 
-    /// Restores workspace
-    static func restoreWorkspace(name: String) {
-        // Minimal log for restoring windows or documents
-        print("Restoring workspace: \(name)")
-        let fileURL = workspaceFile(named: name)
-        guard let data = try? Data(contentsOf: fileURL) else {
-            return
+    /// Deletes a saved workspace
+        static func deleteWorkspace(name: String) {
+            let fileURL = workspaceFile(named: name)
+            do {
+                try FileManager.default.removeItem(at: fileURL)
+                print("Deleted workspace: \(name)")
+            } catch {
+                print("Error deleting workspace \(name): \(error)")
+            }
         }
-
-        do {
-            if let workspace = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let apps = workspace["apps"] as? [[String: Any]] {
-
-                for app in apps {
-                    let appName = app["name"] as? String ?? ""
-                    print("Restoring app: \(appName)")
-                    let bundleID = app["bundleID"] as? String ?? ""
-
-                    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-                        openApp(at: url)
-
-                        let hasWindows = (app["windows"] as? [[String: Any]])?.isEmpty == false
-                        if !hasWindows {
-                            continue
-                        }
-
-                        usleep(400_000)
-
-                        if let windows = app["windows"] as? [[String: Any]],
-                           let pid = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID })?.processIdentifier {
-                            let axApp = AXUIElementCreateApplication(pid)
-                            var axWindowsObj: AnyObject?
-                            var axWindows: [AXUIElement] = []
-                            let maxWait: TimeInterval = 5.0
-                            let pollInterval: TimeInterval = 0.2
-                            let start = Date()
-                            var found = false
-                            repeat {
-                                let res = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindowsObj)
-                                if res == .success, let wins = axWindowsObj as? [AXUIElement], wins.count >= windows.count {
-                                    axWindows = wins
-                                    found = true
-                                    break
-                                }
-                                usleep(useconds_t(pollInterval * 1_000_000))
-                            } while Date().timeIntervalSince(start) < maxWait
-
-                            if !found {
-                                let res2 = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindowsObj)
-                                if res2 == .success, let wins = axWindowsObj as? [AXUIElement] {
-                                    axWindows = wins
-                                }
-                            }
-
-                            if !axWindows.isEmpty {
-                                let indexedWindows = axWindows.enumerated().map { (i, win) -> (Int, AXUIElement, CGFloat) in
-                                    var sizeRef: CFTypeRef?
-                                    var area: CGFloat = 0
-                                    if AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
-                                       let sizeCF = sizeRef, CFGetTypeID(sizeCF) == AXValueGetTypeID() {
-                                        var sz = CGSize.zero
-                                        if AXValueGetValue(sizeCF as! AXValue, .cgSize, &sz) {
-                                            area = sz.width * sz.height
-                                        }
-                                    }
-                                    return (i, win, area)
-                                }
-                                let sortedIndices = indexedWindows.sorted(by: { $0.2 > $1.2 }).map { $0.0 }
-                                let sortedSaved = windows.enumerated().map { (i, win) -> (Int, [String: Any], CGFloat) in
-                                    let w = (win["width"] as? CGFloat ?? 0) * (win["height"] as? CGFloat ?? 0)
-                                    return (i, win, w)
-                                }.sorted(by: { $0.2 > $1.2 })
-                                let count = min(sortedIndices.count, sortedSaved.count)
-                                for n in 0..<count {
-                                    let winIdx = sortedIndices[n]
-                                    let axWin = axWindows[winIdx]
-                                    let winDict = sortedSaved[n].1
-                                    if let x = winDict["x"] as? CGFloat,
-                                       let y = winDict["y"] as? CGFloat,
-                                       let w = winDict["width"] as? CGFloat,
-                                       let h = winDict["height"] as? CGFloat {
-                                        var pt = CGPoint(x: x, y: y)
-                                        var sz = CGSize(width: w, height: h)
-                                        if let posVal = AXValueCreate(.cgPoint, &pt) {
-                                            _ = AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
-                                        }
-                                        if let sizeVal = AXValueCreate(.cgSize, &sz) {
-                                            _ = AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sizeVal)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Handle Safari tabs if present
-                        if bundleID == "com.apple.Safari",
-                           let safariTabs = app["safariTabs"] as? [[String]] {
-                            print("Restoring Safari tabs...")
-                            restoreSafariTabs(safariTabs)
-                        }
-
-                        // Handle Word docs if present
-                        if bundleID.lowercased().contains("word"),
-                           let docs = app["wordDocs"] as? [String] {
-                            print("Restoring Word documents...")
-                            restoreWordDocs(docs)
-                        }
+        
+        /// Closes all apps that are not in the given workspace
+        static func closeAppsNotInWorkspace(_ workspaceApps: [[String: Any]]) {
+            let workspaceBundleIDs = Set(workspaceApps.compactMap { $0["bundleID"] as? String })
+            
+            // System apps that should never be closed
+            let protectedBundleIDs: Set<String> = [
+                "com.apple.finder",
+                "com.apple.systemuiserver",
+                "com.apple.dock",
+                "com.apple.notificationcenterui",
+                "com.apple.controlcenter",
+                Bundle.main.bundleIdentifier ?? ""  // Don't close ourselves
+            ]
+            
+            let runningApps = NSWorkspace.shared.runningApplications
+                .filter { $0.activationPolicy == .regular }
+            
+            for app in runningApps {
+                guard let bundleID = app.bundleIdentifier else { continue }
+                
+                // Skip if it's in the workspace or protected
+                if workspaceBundleIDs.contains(bundleID) || protectedBundleIDs.contains(bundleID) {
+                    continue
+                }
+                
+                // Try to terminate gracefully first
+                if let appName = app.localizedName {
+                    print("Closing app not in workspace: \(appName)")
+                }
+                
+                app.terminate()
+                
+                // If it doesn't respond to terminate, try force quit after a delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    if app.isTerminated == false {
+                        app.forceTerminate()
                     }
                 }
             }
-        } catch {
         }
-    }
+        
+        /// Modified restoreWorkspace function with closeOthers parameter
+        static func restoreWorkspace(name: String, closeOthers: Bool = false) {
+            print("Restoring workspace: \(name)")
+            let fileURL = workspaceFile(named: name)
+            guard let data = try? Data(contentsOf: fileURL) else {
+                return
+            }
+
+            do {
+                if let workspace = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let apps = workspace["apps"] as? [[String: Any]] {
+
+                    // Close other apps first if requested
+                    if closeOthers {
+                        print("Closing apps not in workspace...")
+                        closeAppsNotInWorkspace(apps)
+                        // Wait a bit for apps to close
+                        usleep(1_000_000)
+                    }
+
+                    // Then restore the workspace apps (rest of the existing code)
+                    for app in apps {
+                        let appName = app["name"] as? String ?? ""
+                        print("Restoring app: \(appName)")
+                        let bundleID = app["bundleID"] as? String ?? ""
+
+                        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                            openApp(at: url)
+
+                            let hasWindows = (app["windows"] as? [[String: Any]])?.isEmpty == false
+                            if !hasWindows {
+                                continue
+                            }
+
+                            usleep(400_000)
+
+                            if let windows = app["windows"] as? [[String: Any]],
+                               let pid = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID })?.processIdentifier {
+                                let axApp = AXUIElementCreateApplication(pid)
+                                var axWindowsObj: AnyObject?
+                                var axWindows: [AXUIElement] = []
+                                let maxWait: TimeInterval = 5.0
+                                let pollInterval: TimeInterval = 0.2
+                                let start = Date()
+                                var found = false
+                                repeat {
+                                    let res = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindowsObj)
+                                    if res == .success, let wins = axWindowsObj as? [AXUIElement], wins.count >= windows.count {
+                                        axWindows = wins
+                                        found = true
+                                        break
+                                    }
+                                    usleep(useconds_t(pollInterval * 1_000_000))
+                                } while Date().timeIntervalSince(start) < maxWait
+
+                                if !found {
+                                    let res2 = AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &axWindowsObj)
+                                    if res2 == .success, let wins = axWindowsObj as? [AXUIElement] {
+                                        axWindows = wins
+                                    }
+                                }
+
+                                if !axWindows.isEmpty {
+                                    let indexedWindows = axWindows.enumerated().map { (i, win) -> (Int, AXUIElement, CGFloat) in
+                                        var sizeRef: CFTypeRef?
+                                        var area: CGFloat = 0
+                                        if AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef) == .success,
+                                           let sizeCF = sizeRef, CFGetTypeID(sizeCF) == AXValueGetTypeID() {
+                                            var sz = CGSize.zero
+                                            if AXValueGetValue(sizeCF as! AXValue, .cgSize, &sz) {
+                                                area = sz.width * sz.height
+                                            }
+                                        }
+                                        return (i, win, area)
+                                    }
+                                    let sortedIndices = indexedWindows.sorted(by: { $0.2 > $1.2 }).map { $0.0 }
+                                    let sortedSaved = windows.enumerated().map { (i, win) -> (Int, [String: Any], CGFloat) in
+                                        let w = (win["width"] as? CGFloat ?? 0) * (win["height"] as? CGFloat ?? 0)
+                                        return (i, win, w)
+                                    }.sorted(by: { $0.2 > $1.2 })
+                                    let count = min(sortedIndices.count, sortedSaved.count)
+                                    for n in 0..<count {
+                                        let winIdx = sortedIndices[n]
+                                        let axWin = axWindows[winIdx]
+                                        let winDict = sortedSaved[n].1
+                                        if let x = winDict["x"] as? CGFloat,
+                                           let y = winDict["y"] as? CGFloat,
+                                           let w = winDict["width"] as? CGFloat,
+                                           let h = winDict["height"] as? CGFloat {
+                                            var pt = CGPoint(x: x, y: y)
+                                            var sz = CGSize(width: w, height: h)
+                                            if let posVal = AXValueCreate(.cgPoint, &pt) {
+                                                _ = AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, posVal)
+                                            }
+                                            if let sizeVal = AXValueCreate(.cgSize, &sz) {
+                                                _ = AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sizeVal)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Handle Safari tabs if present
+                            if bundleID == "com.apple.Safari",
+                               let safariTabs = app["safariTabs"] as? [[String]] {
+                                print("Restoring Safari tabs...")
+                                restoreSafariTabs(safariTabs)
+                            }
+
+                            // Handle Word docs if present
+                            if bundleID.lowercased().contains("word"),
+                               let docs = app["wordDocs"] as? [String] {
+                                print("Restoring Word documents...")
+                                restoreWordDocs(docs)
+                            }
+                        }
+                    }
+                }
+            } catch {
+            }
+        }
 
     /// Safari state capture & restore
     static func getSafariState() -> [[String]]? {
